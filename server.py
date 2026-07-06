@@ -124,6 +124,58 @@ async def export_memories(request):
 
 
 # =============================================================
+# /snapshot endpoint: rolling "recent conversation" snapshot
+# 近况快照接收口：总机每轮聊天后把"最近聊到哪"写进一个固定记忆桶
+# 同一个文件反复覆盖更新，不会堆积；新对话开场靠它接上上文
+# =============================================================
+@mcp.custom_route("/snapshot", methods=["POST"])
+async def update_snapshot_route(request):
+    import time as _time
+    from starlette.responses import JSONResponse
+
+    token = os.environ.get("OMBRE_EXPORT_TOKEN", "")
+    if not token or request.query_params.get("token", "") != token:
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "请求格式不对"}, status_code=400)
+    content = (data.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"error": "空内容"}, status_code=400)
+
+    now = _time.strftime("%Y-%m-%dT%H:%M:%S")
+    target_dir = os.path.join(config["buckets_dir"], "dynamic", "内心")
+    os.makedirs(target_dir, exist_ok=True)
+    body_text = f"""---
+activation_count: 1
+arousal: 0.4
+created: '{now}'
+domain:
+- 内心
+id: snapshot0
+importance: 8
+last_active: '{now}'
+name: 近况快照
+tags:
+- 近况快照
+- 最近聊天
+- 上个窗口
+- 继续
+type: dynamic
+valence: 0.6
+---
+
+【近况快照·自动更新】最近一次对话进行到（{now}）：
+
+{content}
+"""
+    with open(os.path.join(target_dir, "近况快照_snapshot0.md"), "w", encoding="utf-8") as f:
+        f.write(body_text)
+    return JSONResponse({"status": "ok", "updated": now})
+
+
+# =============================================================
 # Internal helper: merge-or-create
 # 内部辅助：检查是否可合并，可以则合并，否则新建
 # Shared by hold and grow to avoid duplicate logic
