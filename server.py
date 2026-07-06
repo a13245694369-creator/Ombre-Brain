@@ -90,6 +90,40 @@ async def health_check(request):
 
 
 # =============================================================
+# /export endpoint: one-click memory backup (added by Melody's hub setup)
+# 导出小门：在浏览器打开 /export?token=xxx 即可把全部记忆打包下载
+# Token comes from env var OMBRE_EXPORT_TOKEN; endpoint is disabled if unset
+# 密码来自环境变量 OMBRE_EXPORT_TOKEN，不设置则此门关闭
+# =============================================================
+@mcp.custom_route("/export", methods=["GET"])
+async def export_memories(request):
+    import io
+    import time
+    import zipfile
+    from starlette.responses import JSONResponse, Response
+
+    export_token = os.environ.get("OMBRE_EXPORT_TOKEN", "")
+    if not export_token:
+        return JSONResponse({"error": "导出功能未启用（未设置 OMBRE_EXPORT_TOKEN）"}, status_code=403)
+    if request.query_params.get("token", "") != export_token:
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+
+    buckets_dir = config["buckets_dir"]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(buckets_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                zf.write(fpath, os.path.relpath(fpath, buckets_dir))
+    stamp = time.strftime("%Y%m%d-%H%M")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="ombre-memories-{stamp}.zip"'},
+    )
+
+
+# =============================================================
 # Internal helper: merge-or-create
 # 内部辅助：检查是否可合并，可以则合并，否则新建
 # Shared by hold and grow to avoid duplicate logic
