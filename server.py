@@ -176,6 +176,382 @@ valence: 0.6
 
 
 # =============================================================
+# Memory Bridge: /ui — 记忆管理网页（Melody 的记忆桥）
+# 浏览器打开 /ui?token=xxx（token 与 /export 同一把钥匙）：
+# 看全部记忆、搜索、手改原文、说人话让 AI 起草修改、新增（走 hold 正规入库）、删除
+# =============================================================
+def _bridge_token_ok(request) -> bool:
+    token = os.environ.get("OMBRE_EXPORT_TOKEN", "")
+    return bool(token) and request.query_params.get("token", "") == token
+
+
+def _bridge_safe_path(rel: str) -> str:
+    """把网页传来的相对路径钉死在 buckets 目录里，防止越狱到别的文件"""
+    base = os.path.realpath(config["buckets_dir"])
+    p = os.path.realpath(os.path.join(base, rel))
+    if not (p.startswith(base + os.sep) and p.endswith(".md")):
+        raise ValueError("路径不合法")
+    return p
+
+
+def _bridge_parse(fpath: str):
+    """读一个记忆文件，拆出 (元数据字典, 正文)；解析不了就当纯正文"""
+    import yaml
+    with open(fpath, encoding="utf-8") as f:
+        raw = f.read()
+    if raw.startswith("---"):
+        parts = raw.split("---", 2)
+        if len(parts) >= 3:
+            try:
+                return (yaml.safe_load(parts[1]) or {}), parts[2].strip(), raw
+            except Exception:
+                pass
+    return {}, raw.strip(), raw
+
+
+@mcp.custom_route("/api/list", methods=["GET"])
+async def bridge_list(request):
+    from starlette.responses import JSONResponse
+    if not _bridge_token_ok(request):
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    base = config["buckets_dir"]
+    items = []
+    for root, _dirs, files in os.walk(base):
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, base)
+            try:
+                meta, body, _raw = _bridge_parse(fpath)
+            except Exception:
+                meta, body = {}, ""
+            items.append({
+                "path": rel,
+                "folder": rel.split(os.sep)[0],
+                "name": str(meta.get("name") or fname[:-3]),
+                "importance": meta.get("importance", 5),
+                "pinned": bool(meta.get("pinned", False)),
+                "last_active": str(meta.get("last_active") or meta.get("created") or ""),
+                "tags": [str(t) for t in (meta.get("tags") or [])][:6],
+                "preview": body[:90],
+            })
+    items.sort(key=lambda x: x["last_active"], reverse=True)
+    return JSONResponse({"items": items})
+
+
+@mcp.custom_route("/api/read", methods=["GET"])
+async def bridge_read(request):
+    from starlette.responses import JSONResponse
+    if not _bridge_token_ok(request):
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    try:
+        fpath = _bridge_safe_path(request.query_params.get("path", ""))
+        with open(fpath, encoding="utf-8") as f:
+            return JSONResponse({"content": f.read()})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@mcp.custom_route("/api/save", methods=["POST"])
+async def bridge_save(request):
+    from starlette.responses import JSONResponse
+    if not _bridge_token_ok(request):
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    try:
+        data = await request.json()
+        fpath = _bridge_safe_path(data.get("path", ""))
+        content = data.get("content", "")
+        if not content.strip():
+            return JSONResponse({"error": "内容为空（想删除请用删除按钮）"}, status_code=400)
+        if not content.startswith("---"):
+            return JSONResponse({"error": "文件开头的 --- 元数据段不能丢"}, status_code=400)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@mcp.custom_route("/api/delete", methods=["POST"])
+async def bridge_delete(request):
+    from starlette.responses import JSONResponse
+    if not _bridge_token_ok(request):
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    try:
+        data = await request.json()
+        fpath = _bridge_safe_path(data.get("path", ""))
+        os.remove(fpath)
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@mcp.custom_route("/api/new", methods=["POST"])
+async def bridge_new(request):
+    """新增记忆：走和 hold 一样的正规入库（原文保存、自动打标签）；给了名字就按名字建"""
+    from starlette.responses import JSONResponse
+    if not _bridge_token_ok(request):
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    try:
+        data = await request.json()
+        content = (data.get("content") or "").strip()
+        if not content:
+            return JSONResponse({"error": "内容为空"}, status_code=400)
+        name = (data.get("name") or "").strip()
+        importance = max(1, min(10, int(data.get("importance", 5))))
+        pinned = bool(data.get("pinned", False))
+        extra_tags = [t.strip() for t in (data.get("tags") or "").split(",") if t.strip()]
+        try:
+            analysis = await dehydrator.analyze(content)
+        except Exception:
+            analysis = {"domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+                        "tags": [], "suggested_name": ""}
+        all_tags = list(dict.fromkeys(analysis["tags"] + extra_tags))
+        if name or pinned:
+            # 指定了名字或要钉选：直接新建（不参与合并，免得她的名字被吃掉）
+            bucket_id = await bucket_mgr.create(
+                content=content, tags=all_tags,
+                importance=10 if pinned else importance,
+                domain=analysis["domain"], valence=analysis["valence"],
+                arousal=analysis["arousal"], name=name or None,
+                bucket_type="permanent" if pinned else "dynamic", pinned=pinned,
+            )
+            return JSONResponse({"status": "ok", "result": f"已新建：{bucket_id}"})
+        result_name, is_merged = await _merge_or_create(
+            content=content, tags=all_tags, importance=importance,
+            domain=analysis["domain"], valence=analysis["valence"],
+            arousal=analysis["arousal"], name=analysis.get("suggested_name", ""),
+        )
+        return JSONResponse({"status": "ok",
+                             "result": ("已并入相似记忆：" if is_merged else "已新建：") + str(result_name)})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@mcp.custom_route("/api/draft", methods=["POST"])
+async def bridge_draft(request):
+    """AI 起草：拿原文件+她的自然语言指令，让脱水器同款 AI 输出改好的完整文件（她过目后才保存）"""
+    from starlette.responses import JSONResponse
+    if not _bridge_token_ok(request):
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    if not getattr(dehydrator, "api_available", False):
+        return JSONResponse({"error": "AI 起草不可用（脱水器没配钥匙），请手动编辑"}, status_code=400)
+    try:
+        data = await request.json()
+        instruction = (data.get("instruction") or "").strip()
+        original = data.get("original") or ""
+        if not instruction or not original:
+            return JSONResponse({"error": "指令或原文为空"}, status_code=400)
+        resp = await dehydrator.client.chat.completions.create(
+            model=dehydrator.model,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content":
+                    "你是记忆文件编辑器。用户给你一个记忆文件（开头是 --- 包住的 YAML 元数据，后面是正文）"
+                    "和一条修改指令。你输出修改后的完整文件。规则："
+                    "1) 只改指令要求的部分，其余一字不动；"
+                    "2) YAML 元数据的结构和字段名保持原样（指令要求改 importance/tags/name 等字段时才改对应值）；"
+                    "3) 正文保留原话和细节，不要擅自压缩改写；"
+                    "4) 只输出文件内容本身，不要解释，不要用```包裹。"},
+                {"role": "user", "content": f"修改指令：{instruction}\n\n原文件：\n{original}"},
+            ],
+        )
+        draft = (resp.choices[0].message.content or "").strip()
+        if draft.startswith("```"):
+            draft = draft.strip("`").lstrip("markdown").lstrip("md").strip()
+        if not draft.startswith("---"):
+            return JSONResponse({"error": "AI 起草的结果格式不对，没有采用；请再试一次或手动编辑"}, status_code=400)
+        return JSONResponse({"draft": draft})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+_BRIDGE_HTML = """<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆桥</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; }
+body { font: 15px/1.6 -apple-system, "PingFang SC", sans-serif; background: #14121a; color: #e8e4f0; padding-bottom: 90px; }
+header { position: sticky; top: 0; background: #1d1a26; padding: 12px 16px; z-index: 5; box-shadow: 0 2px 8px #0006; }
+h1 { font-size: 17px; margin-bottom: 8px; }
+h1 small { color: #9a90b8; font-weight: normal; font-size: 12px; margin-left: 8px; }
+#q { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid #3a3450; background: #141120; color: inherit; font-size: 15px; }
+.chips { display: flex; gap: 8px; margin-top: 8px; }
+.chip { padding: 4px 12px; border-radius: 999px; background: #2a2438; font-size: 13px; cursor: pointer; border: 1px solid transparent; }
+.chip.on { background: #4b3a75; border-color: #8a6fd8; }
+#list { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.card { background: #1d1a26; border-radius: 12px; padding: 12px 14px; cursor: pointer; }
+.card .t { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.card .n { font-weight: 600; }
+.card .i { color: #ffb84d; font-size: 12px; white-space: nowrap; }
+.card .p { color: #9a90b8; font-size: 13px; margin-top: 4px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.card .m { color: #6f6590; font-size: 11px; margin-top: 4px; }
+#fab { position: fixed; right: 20px; bottom: 24px; width: 56px; height: 56px; border-radius: 50%; background: #7a5cd0; color: #fff; font-size: 30px; border: 0; box-shadow: 0 4px 16px #0008; cursor: pointer; }
+.overlay { position: fixed; inset: 0; background: #14121aee; z-index: 10; overflow-y: auto; padding: 14px; display: none; }
+.overlay.show { display: block; }
+.panel { max-width: 720px; margin: 0 auto; background: #1d1a26; border-radius: 14px; padding: 16px; }
+.panel h2 { font-size: 16px; margin-bottom: 10px; word-break: break-all; }
+.body-view { white-space: pre-wrap; word-break: break-word; background: #141120; border-radius: 10px; padding: 12px; font-size: 14px; }
+textarea { width: 100%; min-height: 300px; background: #141120; color: inherit; border: 1px solid #3a3450; border-radius: 10px; padding: 10px; font: 13px/1.5 ui-monospace, monospace; }
+input[type=text], input[type=number] { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid #3a3450; background: #141120; color: inherit; font-size: 15px; margin-bottom: 8px; }
+.btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+button { padding: 9px 16px; border-radius: 10px; border: 0; background: #2a2438; color: inherit; font-size: 14px; cursor: pointer; }
+button.pri { background: #7a5cd0; color: #fff; }
+button.warn { background: #6e2a3a; }
+.hint { color: #9a90b8; font-size: 12px; margin-top: 8px; }
+.draftbar { display: flex; gap: 8px; margin-top: 10px; }
+.draftbar input { flex: 1; margin: 0; }
+label { font-size: 13px; color: #9a90b8; }
+#toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 100px; background: #4b3a75; padding: 10px 18px; border-radius: 999px; font-size: 14px; display: none; z-index: 20; }
+</style>
+</head>
+<body>
+<header>
+  <h1>记忆桥 <small id="count"></small></h1>
+  <input id="q" placeholder="搜名字、标签、内容…" oninput="render()">
+  <div class="chips" id="chips"></div>
+</header>
+<div id="list"></div>
+<button id="fab" onclick="openNew()">＋</button>
+
+<div class="overlay" id="ov"><div class="panel" id="panel"></div></div>
+<div id="toast"></div>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const api = (p, opt) => fetch(p + (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN), opt).then(r => r.json());
+let ALL = [], FOLDER = '全部';
+
+function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2200); }
+
+async function load() {
+  const d = await api('/api/list');
+  if (d.error) { document.getElementById('list').textContent = d.error; return; }
+  ALL = d.items;
+  const folders = ['全部', ...new Set(ALL.map(x => x.folder))];
+  document.getElementById('chips').innerHTML = folders.map(f =>
+    `<span class="chip ${f === FOLDER ? 'on' : ''}" onclick="FOLDER='${f}';load_chips();render()">${f}</span>`).join('');
+  render();
+}
+function load_chips() {
+  document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.textContent === FOLDER));
+}
+function render() {
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const rows = ALL.filter(x => (FOLDER === '全部' || x.folder === FOLDER) &&
+    (!q || (x.name + x.preview + x.tags.join(',')).toLowerCase().includes(q)));
+  document.getElementById('count').textContent = rows.length + ' 条';
+  document.getElementById('list').innerHTML = rows.map((x, i) => `
+    <div class="card" onclick="openView('${encodeURIComponent(x.path)}')">
+      <div class="t"><span class="n">${x.pinned ? '📌 ' : ''}${esc(x.name)}</span>
+      <span class="i">★${x.importance}</span></div>
+      <div class="p">${esc(x.preview)}</div>
+      <div class="m">${x.folder} · ${esc(String(x.last_active).slice(0, 16).replace('T', ' '))} · ${esc(x.tags.join(' '))}</div>
+    </div>`).join('') || '<div style="color:#6f6590;text-align:center;padding:40px">没有匹配的记忆</div>';
+}
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function openView(encPath) {
+  const path = decodeURIComponent(encPath);
+  const d = await api('/api/read?path=' + encodeURIComponent(path));
+  if (d.error) return toast(d.error);
+  const body = d.content.startsWith('---') ? d.content.split('---').slice(2).join('---').trim() : d.content;
+  show(`
+    <h2>${esc(path)}</h2>
+    <div class="body-view">${esc(body)}</div>
+    <div class="draftbar"><input id="instr" placeholder="用嘴改：比如 把重要度提到9 / 删掉关于XX那句">
+      <button class="pri" onclick="draft('${encPath}')">AI 帮改</button></div>
+    <div class="btns">
+      <button onclick="openEdit('${encPath}')">✍️ 手动编辑</button>
+      <button class="warn" onclick="del('${encPath}')">🗑 删除</button>
+      <button onclick="hide()">关闭</button>
+    </div>
+    <div class="hint">AI 帮改会先给你看改好的草稿，你确认保存才会真的落盘。</div>`);
+  window._raw = d.content;
+}
+async function openEdit(encPath, content) {
+  const raw = content !== undefined ? content : window._raw;
+  show(`
+    <h2>编辑 ${esc(decodeURIComponent(encPath))}</h2>
+    <textarea id="ta">${esc(raw)}</textarea>
+    <div class="btns">
+      <button class="pri" onclick="save('${encPath}')">💾 保存</button>
+      <button onclick="openView('${encPath}')">放弃</button>
+    </div>
+    <div class="hint">开头两条 --- 之间是元数据（重要度 importance、标签 tags、名字 name 都在里面），格式要保持。</div>`);
+}
+async function draft(encPath) {
+  const instr = document.getElementById('instr').value.trim();
+  if (!instr) return toast('先说要怎么改');
+  toast('AI 起草中…');
+  const d = await api('/api/draft', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ instruction: instr, original: window._raw }) });
+  if (d.error) return toast(d.error);
+  openEdit(encPath, d.draft);
+  toast('草稿已生成，检查后点保存');
+}
+async function save(encPath) {
+  const d = await api('/api/save', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ path: decodeURIComponent(encPath), content: document.getElementById('ta').value }) });
+  if (d.error) return toast(d.error);
+  toast('已保存'); hide(); load();
+}
+async function del(encPath) {
+  if (!confirm('真的删掉这条记忆？删了就没了。')) return;
+  const d = await api('/api/delete', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ path: decodeURIComponent(encPath) }) });
+  if (d.error) return toast(d.error);
+  toast('已删除'); hide(); load();
+}
+function openNew() {
+  show(`
+    <h2>新记忆</h2>
+    <input type="text" id="n_name" placeholder="名字（可不填，AI 会起；专有名词建议写进名字）">
+    <textarea id="n_content" style="min-height:160px" placeholder="正文，想怎么写就怎么写，会原文保存"></textarea>
+    <input type="text" id="n_tags" placeholder="标签，逗号分隔（可不填，AI 会打）">
+    <label>重要度 1-10：<input type="number" id="n_imp" value="6" min="1" max="10" style="width:80px"></label>
+    <label style="display:block;margin-top:6px"><input type="checkbox" id="n_pin"> 📌 钉选（重要度拉满，永不遗忘，每次对话必浮现——慎用）</label>
+    <div class="btns">
+      <button class="pri" onclick="createNew()">存入记忆</button>
+      <button onclick="hide()">取消</button>
+    </div>`);
+}
+async function createNew() {
+  const body = { name: document.getElementById('n_name').value.trim(),
+    content: document.getElementById('n_content').value.trim(),
+    tags: document.getElementById('n_tags').value.trim(),
+    importance: +document.getElementById('n_imp').value || 6,
+    pinned: document.getElementById('n_pin').checked };
+  if (!body.content) return toast('正文不能为空');
+  toast('入库中…');
+  const d = await api('/api/new', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body) });
+  if (d.error) return toast(d.error);
+  toast(d.result); hide(); load();
+}
+function show(html) { document.getElementById('panel').innerHTML = html; document.getElementById('ov').classList.add('show'); }
+function hide() { document.getElementById('ov').classList.remove('show'); }
+document.getElementById('ov').addEventListener('click', e => { if (e.target.id === 'ov') hide(); });
+load();
+</script>
+</body>
+</html>"""
+
+
+@mcp.custom_route("/ui", methods=["GET"])
+async def bridge_ui(request):
+    from starlette.responses import HTMLResponse, JSONResponse
+    if not _bridge_token_ok(request):
+        return JSONResponse({"error": "token 不对（网址要带 ?token=…）"}, status_code=401)
+    return HTMLResponse(_BRIDGE_HTML)
+
+
+# =============================================================
 # Internal helper: merge-or-create
 # 内部辅助：检查是否可合并，可以则合并，否则新建
 # Shared by hold and grow to avoid duplicate logic
