@@ -259,8 +259,10 @@ async def bridge_save(request):
     if not _bridge_token_ok(request):
         return JSONResponse({"error": "token 不对"}, status_code=401)
     try:
+        import yaml
         data = await request.json()
-        fpath = _bridge_safe_path(data.get("path", ""))
+        rel = data.get("path", "")
+        fpath = _bridge_safe_path(rel)
         content = data.get("content", "")
         if not content.strip():
             return JSONResponse({"error": "内容为空（想删除请用删除按钮）"}, status_code=400)
@@ -268,7 +270,22 @@ async def bridge_save(request):
             return JSONResponse({"error": "文件开头的 --- 元数据段不能丢"}, status_code=400)
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
-        return JSONResponse({"status": "ok"})
+        # 对户口：钉选状态（文件内容）和住的文件夹要一致，不一致就搬家
+        # 取消钉选 = pinned:false + type:dynamic → 搬去 dynamic；反之搬去 permanent
+        note = ""
+        try:
+            meta = yaml.safe_load(content.split("---", 2)[1]) or {}
+            desired = "permanent" if (meta.get("pinned") or meta.get("type") == "permanent") else "dynamic"
+            parts = rel.replace("\\", "/").split("/")
+            if parts[0] in ("dynamic", "permanent") and parts[0] != desired:
+                new_rel = "/".join([desired] + parts[1:])
+                new_path = _bridge_safe_path(new_rel)
+                os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                os.rename(fpath, new_path)
+                note = f"已搬到 {desired} 层"
+        except Exception:
+            pass  # 搬家失败不影响保存本身
+        return JSONResponse({"status": "ok", "note": note})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -352,6 +369,8 @@ async def bridge_draft(request):
                     "和一条修改指令。你输出修改后的完整文件。规则："
                     "1) 只改指令要求的部分，其余一字不动；"
                     "2) YAML 元数据的结构和字段名保持原样（指令要求改 importance/tags/name 等字段时才改对应值）；"
+                    "取消钉选＝把 pinned 改成 false 且 type 改成 dynamic（importance 按指令，没说就改成 8）；"
+                    "钉选＝pinned 改 true 且 type 改 permanent 且 importance 改 10；"
                     "3) 正文保留原话和细节，不要擅自压缩改写；"
                     "4) 只输出文件内容本身，不要解释，不要用```包裹。"},
                 {"role": "user", "content": f"修改指令：{instruction}\n\n原文件：\n{original}"},
@@ -499,7 +518,7 @@ async function save(encPath) {
   const d = await api('/api/save', { method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ path: decodeURIComponent(encPath), content: document.getElementById('ta').value }) });
   if (d.error) return toast(d.error);
-  toast('已保存'); hide(); load();
+  toast('已保存' + (d.note ? '，' + d.note : '')); hide(); load();
 }
 async function del(encPath) {
   if (!confirm('真的删掉这条记忆？删了就没了。')) return;
