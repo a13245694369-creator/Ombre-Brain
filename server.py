@@ -480,9 +480,20 @@ async function openView(encPath) {
   const d = await api('/api/read?path=' + encodeURIComponent(path));
   if (d.error) return toast(d.error);
   const body = d.content.startsWith('---') ? d.content.split('---').slice(2).join('---').trim() : d.content;
+  // 查看模式给她看纯文本：洗掉 Markdown 符号（井号/星号/反引号/双方括号/列表点）
+  const plain = body
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/\*\*([^*]*)\*\*/g, '$1')
+    .replace(/\*([^*]*)\*/g, '$1')
+    .replace(/`{1,3}/g, '')
+    .replace(/\[\[|\]\]/g, '')
+    .replace(/^[-*+]\s+/gm, '')
+    .replace(/^>\s?/gm, '');
+  // 标题只留记忆的名字（去掉文件夹、.md 后缀和末尾的编号）
+  const title = path.split('/').pop().replace(/\.md$/, '').replace(/_[A-Za-z0-9-]+$/, '');
   show(`
-    <h2>${esc(path)}</h2>
-    <div class="body-view">${esc(body)}</div>
+    <h2>${esc(title)}</h2>
+    <div class="body-view">${esc(plain)}</div>
     <div class="draftbar"><input id="instr" placeholder="用嘴改：比如 把重要度提到9 / 删掉关于XX那句">
       <button class="pri" onclick="draft('${encPath}')">AI 帮改</button></div>
     <div class="btns">
