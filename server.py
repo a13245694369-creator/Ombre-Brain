@@ -467,33 +467,33 @@ function render() {
   document.getElementById('count').textContent = rows.length + ' 条';
   document.getElementById('list').innerHTML = rows.map((x, i) => `
     <div class="card" onclick="openView('${encodeURIComponent(x.path)}')">
-      <div class="t"><span class="n">${x.pinned ? '📌 ' : ''}${esc(x.name)}</span>
+      <div class="t"><span class="n">${x.pinned ? '📌 ' : ''}${esc(plain(x.name))}</span>
       <span class="i">★${x.importance}</span></div>
-      <div class="p">${esc(x.preview)}</div>
+      <div class="p">${esc(plain(x.preview))}</div>
       <div class="m">${x.folder} · ${esc(String(x.last_active).slice(0, 16).replace('T', ' '))} · ${esc(x.tags.join(' '))}</div>
     </div>`).join('') || '<div style="color:#6f6590;text-align:center;padding:40px">没有匹配的记忆</div>';
 }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// 洗掉 Markdown 符号，给她看纯文本（列表和查看页共用）
+const plain = s => String(s)
+  .replace(/^#{1,6}\s*/gm, '')
+  .replace(/\*\*([^*]*)\*\*/g, '$1')
+  .replace(/\*([^*]*)\*/g, '$1')
+  .replace(/`{1,3}/g, '')
+  .replace(/\[\[|\]\]/g, '')
+  .replace(/^[-*+]\s+/gm, '')
+  .replace(/^>\s?/gm, '');
 
 async function openView(encPath) {
   const path = decodeURIComponent(encPath);
   const d = await api('/api/read?path=' + encodeURIComponent(path));
   if (d.error) return toast(d.error);
   const body = d.content.startsWith('---') ? d.content.split('---').slice(2).join('---').trim() : d.content;
-  // 查看模式给她看纯文本：洗掉 Markdown 符号（井号/星号/反引号/双方括号/列表点）
-  const plain = body
-    .replace(/^#{1,6}\s*/gm, '')
-    .replace(/\*\*([^*]*)\*\*/g, '$1')
-    .replace(/\*([^*]*)\*/g, '$1')
-    .replace(/`{1,3}/g, '')
-    .replace(/\[\[|\]\]/g, '')
-    .replace(/^[-*+]\s+/gm, '')
-    .replace(/^>\s?/gm, '');
   // 标题只留记忆的名字（去掉文件夹、.md 后缀和末尾的编号）
   const title = path.split('/').pop().replace(/\.md$/, '').replace(/_[A-Za-z0-9-]+$/, '');
   show(`
     <h2>${esc(title)}</h2>
-    <div class="body-view">${esc(plain)}</div>
+    <div class="body-view">${esc(plain(body))}</div>
     <div class="draftbar"><input id="instr" placeholder="用嘴改：比如 把重要度提到9 / 删掉关于XX那句">
       <button class="pri" onclick="draft('${encPath}')">AI 帮改</button></div>
     <div class="btns">
@@ -505,15 +505,28 @@ async function openView(encPath) {
   window._raw = d.content;
 }
 async function openEdit(encPath, content) {
-  const raw = content !== undefined ? content : window._raw;
+  // 手动编辑：只给她看正文（人话），元数据头我收在口袋里，保存时自动接回去
+  const isDraft = content !== undefined;   // AI 草稿走老路：整个文件原样编辑
+  const raw = isDraft ? content : window._raw;
+  let body = raw, hdr = '';
+  if (!isDraft && raw.startsWith('---')) {
+    const parts = raw.split('---');
+    hdr = '---' + parts[1] + '---';
+    body = parts.slice(2).join('---').trim();
+  }
+  window._hdr = isDraft ? '' : hdr;
+  const title = decodeURIComponent(encPath).split('/').pop()
+    .replace(/\.md$/, '').replace(/_[A-Za-z0-9-]+$/, '');
   show(`
-    <h2>编辑 ${esc(decodeURIComponent(encPath))}</h2>
-    <textarea id="ta">${esc(raw)}</textarea>
+    <h2>编辑 ${esc(title)}</h2>
+    <textarea id="ta">${esc(isDraft ? raw : body)}</textarea>
     <div class="btns">
       <button class="pri" onclick="save('${encPath}')">💾 保存</button>
       <button onclick="openView('${encPath}')">放弃</button>
     </div>
-    <div class="hint">开头两条 --- 之间是元数据（重要度 importance、标签 tags、名字 name 都在里面），格式要保持。</div>`);
+    <div class="hint">${isDraft
+      ? '开头两条 --- 之间是元数据，格式要保持。'
+      : '直接写人话就行。名字、标签、重要度这些格式的事，保存时我来接好。'}</div>`);
 }
 async function draft(encPath) {
   const instr = document.getElementById('instr').value.trim();
@@ -526,9 +539,13 @@ async function draft(encPath) {
   toast('草稿已生成，检查后点保存');
 }
 async function save(encPath) {
+  let content = document.getElementById('ta').value;
+  // 她只写了正文的话，把收好的元数据头接回去，落盘永远是完整格式
+  if (window._hdr) content = window._hdr + '\n\n' + content.trim() + '\n';
   const d = await api('/api/save', { method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ path: decodeURIComponent(encPath), content: document.getElementById('ta').value }) });
+    body: JSON.stringify({ path: decodeURIComponent(encPath), content }) });
   if (d.error) return toast(d.error);
+  window._hdr = '';
   toast('已保存' + (d.note ? '，' + d.note : '')); hide(); load();
 }
 async function del(encPath) {
