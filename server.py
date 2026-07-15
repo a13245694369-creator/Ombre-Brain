@@ -541,7 +541,7 @@ async function draft(encPath) {
 async function save(encPath) {
   let content = document.getElementById('ta').value;
   // 她只写了正文的话，把收好的元数据头接回去，落盘永远是完整格式
-  if (window._hdr) content = window._hdr + '\n\n' + content.trim() + '\n';
+  if (window._hdr) content = window._hdr + '\\n\\n' + content.trim() + '\\n';
   const d = await api('/api/save', { method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ path: decodeURIComponent(encPath), content }) });
   if (d.error) return toast(d.error);
