@@ -505,7 +505,8 @@ async function openView(encPath) {
   window._raw = d.content;
 }
 async function openEdit(encPath, content) {
-  // 手动编辑：只给她看正文（人话），元数据头我收在口袋里，保存时自动接回去
+  // 手动编辑：只给她看纯文本正文（[[链接]] 符号摘掉、元数据头收进口袋），
+  // 保存时自动把链接穿回去、头接回去，落盘永远是完整格式
   const isDraft = content !== undefined;   // AI 草稿走老路：整个文件原样编辑
   const raw = isDraft ? content : window._raw;
   let body = raw, hdr = '';
@@ -515,18 +516,41 @@ async function openEdit(encPath, content) {
     body = parts.slice(2).join('---').trim();
   }
   window._hdr = isDraft ? '' : hdr;
+  // 记住原文里哪些词带 [[链接]]，保存时按这份清单自动穿回去
+  window._links = isDraft ? [] :
+    Array.from(new Set((body.match(/\[\[[^\]]*\]\]/g) || []).map(s => s.slice(2, -2))));
+  const shown = isDraft ? raw : body.replace(/\[\[|\]\]/g, '');
   const title = decodeURIComponent(encPath).split('/').pop()
     .replace(/\.md$/, '').replace(/_[A-Za-z0-9-]+$/, '');
   show(`
     <h2>编辑 ${esc(title)}</h2>
-    <textarea id="ta">${esc(isDraft ? raw : body)}</textarea>
+    <textarea id="ta">${esc(shown)}</textarea>
     <div class="btns">
       <button class="pri" onclick="save('${encPath}')">💾 保存</button>
       <button onclick="openView('${encPath}')">放弃</button>
     </div>
     <div class="hint">${isDraft
       ? '开头两条 --- 之间是元数据，格式要保持。'
-      : '直接写人话就行。名字、标签、重要度这些格式的事，保存时我来接好。'}</div>`);
+      : '这里是纯文本，放心改。链接符号、元数据这些格式的事，保存时我自动接好。'}</div>`);
+}
+// 把纯文本里原来带链接的词重新穿上 [[ ]]（长词优先，已包好的不重复包）
+function relink(text, terms) {
+  const sorted = Array.from(new Set(terms)).filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  let segs = [{ linked: false, s: text }];
+  for (const t of sorted) {
+    const next = [];
+    for (const seg of segs) {
+      if (seg.linked || !seg.s.includes(t)) { next.push(seg); continue; }
+      const parts = seg.s.split(t);
+      parts.forEach((p, i) => {
+        if (p) next.push({ linked: false, s: p });
+        if (i < parts.length - 1) next.push({ linked: true, s: t });
+      });
+    }
+    segs = next;
+  }
+  return segs.map(x => x.linked ? '[[' + x.s + ']]' : x.s).join('');
 }
 async function draft(encPath) {
   const instr = document.getElementById('instr').value.trim();
@@ -540,8 +564,12 @@ async function draft(encPath) {
 }
 async function save(encPath) {
   let content = document.getElementById('ta').value;
-  // 她只写了正文的话，把收好的元数据头接回去，落盘永远是完整格式
-  if (window._hdr) content = window._hdr + '\\n\\n' + content.trim() + '\\n';
+  // 她只写了正文的话：先把 [[链接]] 按清单穿回去，再把收好的元数据头接回去
+  if (window._hdr) {
+    let body = content.trim();
+    if (window._links && window._links.length) body = relink(body, window._links);
+    content = window._hdr + '\\n\\n' + body + '\\n';
+  }
   const d = await api('/api/save', { method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ path: decodeURIComponent(encPath), content }) });
   if (d.error) return toast(d.error);
