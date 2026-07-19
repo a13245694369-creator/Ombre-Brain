@@ -537,6 +537,7 @@ async function openEdit(encPath, content) {
     <div class="btns">
       <button class="pri" onclick="save('${encPath}')">💾 保存</button>
       <button onclick="openView('${encPath}')">放弃</button>
+      <button class="warn" onclick="del('${encPath}')">🗑 删除这条记忆</button>
     </div>
     <div class="hint">${isDraft
       ? '开头两条 --- 之间是元数据，格式要保持。'
