@@ -416,7 +416,8 @@ h1 small { color: #9a90b8; font-weight: normal; font-size: 12px; margin-left: 8p
 .panel { max-width: 720px; margin: 0 auto; background: #1d1a26; border-radius: 14px; padding: 16px; }
 .panel h2 { font-size: 16px; margin-bottom: 10px; word-break: break-all; }
 .body-view { white-space: pre-wrap; word-break: break-word; background: #141120; border-radius: 10px; padding: 12px; font-size: 14px; }
-textarea { width: 100%; min-height: 300px; background: #141120; color: inherit; border: 1px solid #3a3450; border-radius: 10px; padding: 10px; font: 13px/1.5 ui-monospace, monospace; }
+/* 16px + 系统中文字体：小于16px iOS 会自动缩放、等宽西文字体配中文会让光标算错位置 */
+textarea { width: 100%; min-height: 300px; background: #141120; color: inherit; border: 1px solid #3a3450; border-radius: 10px; padding: 12px; box-sizing: border-box; font: 16px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-text-size-adjust: 100%; }
 input[type=text], input[type=number] { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid #3a3450; background: #141120; color: inherit; font-size: 15px; margin-bottom: 8px; }
 .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 button { padding: 9px 16px; border-radius: 10px; border: 0; background: #2a2438; color: inherit; font-size: 14px; cursor: pointer; }
@@ -522,8 +523,16 @@ async function openEdit(encPath, content) {
   const shown = isDraft ? raw : body.replace(/\[\[|\]\]/g, '');
   const title = decodeURIComponent(encPath).split('/').pop()
     .replace(/\.md$/, '').replace(/_[A-Za-z0-9-]+$/, '');
+  // 名字和标签也拿出来给她改（检索打分里名字×3、标签×2，比正文更管找不找得到）
+  const metaInputs = isDraft ? '' : `
+    <label>名字（检索最看重它）</label>
+    <input type="text" id="ed_name" value="${esc(hdrName(hdr))}">
+    <label>标签（逗号分隔，检索第二看重）</label>
+    <input type="text" id="ed_tags" value="${esc(hdrTags(hdr).join('，'))}">
+    <label>正文</label>`;
   show(`
     <h2>编辑 ${esc(title)}</h2>
+    ${metaInputs}
     <textarea id="ta">${esc(shown)}</textarea>
     <div class="btns">
       <button class="pri" onclick="save('${encPath}')">💾 保存</button>
@@ -532,6 +541,62 @@ async function openEdit(encPath, content) {
     <div class="hint">${isDraft
       ? '开头两条 --- 之间是元数据，格式要保持。'
       : '这里是纯文本，放心改。链接符号、元数据这些格式的事，保存时我自动接好。'}</div>`);
+}
+// ===== 元数据头里名字和标签的读写（纯文本行处理，不碰别的字段） =====
+function hdrName(hdr) {
+  for (const line of hdr.split('\\n')) {
+    if (line.startsWith('name:')) {
+      let v = line.slice(5).trim();
+      if (v.length > 1 && (v[0] === '"' || v[0] === "'") && v[v.length - 1] === v[0]) v = v.slice(1, -1);
+      return v;
+    }
+  }
+  return '';
+}
+function hdrTags(hdr) {
+  const lines = hdr.split('\\n');
+  const i = lines.findIndex(l => l.trim() === 'tags:' || l.startsWith('tags:'));
+  if (i < 0) return [];
+  const tags = [];
+  for (let j = i + 1; j < lines.length; j++) {
+    const t = lines[j].trim();
+    if (t.startsWith('-')) tags.push(t.replace('-', '').trim());
+    else break;
+  }
+  return tags;
+}
+function hdrApply(hdr, name, tags) {
+  const lines = hdr.split('\\n');
+  const out = [];
+  let inTags = false, nameDone = false, tagsDone = false;
+  for (const line of lines) {
+    if (inTags) {
+      if (line.trim().startsWith('-')) continue;  // 旧标签行丢掉
+      inTags = false;
+    }
+    if (line.startsWith('name:')) {
+      out.push('name: "' + name + '"');
+      nameDone = true;
+      continue;
+    }
+    if (line.startsWith('tags:')) {
+      out.push('tags:');
+      for (const t of tags) out.push('- ' + t);
+      inTags = true;
+      tagsDone = true;
+      continue;
+    }
+    out.push(line);
+  }
+  // 头里原本没有这个字段的，补在收尾的 --- 前面
+  const end = out.lastIndexOf('---');
+  if (end > 0) {
+    const add = [];
+    if (!nameDone && name) add.push('name: "' + name + '"');
+    if (!tagsDone && tags.length) { add.push('tags:'); for (const t of tags) add.push('- ' + t); }
+    out.splice(end, 0, ...add);
+  }
+  return out.join('\\n');
 }
 // 把纯文本里原来带链接的词重新穿上 [[ ]]（长词优先，已包好的不重复包）
 function relink(text, terms) {
@@ -564,10 +629,16 @@ async function draft(encPath) {
 }
 async function save(encPath) {
   let content = document.getElementById('ta').value;
-  // 她只写了正文的话：先把 [[链接]] 按清单穿回去，再把收好的元数据头接回去
+  // 她只写了正文的话：先把 [[链接]] 按清单穿回去，名字标签改动写进头里，再把头接回去
   if (window._hdr) {
     let body = content.trim();
     if (window._links && window._links.length) body = relink(body, window._links);
+    const nEl = document.getElementById('ed_name'), tEl = document.getElementById('ed_tags');
+    if (nEl && tEl) {
+      const name = nEl.value.trim().replace(/"/g, "'");  // 双引号会打坏格式，换成单引号
+      const tags = tEl.value.split(/[,，、]/).map(s => s.trim().replace(/"/g, "'")).filter(Boolean);
+      if (name) window._hdr = hdrApply(window._hdr, name, tags);
+    }
     content = window._hdr + '\\n\\n' + body + '\\n';
   }
   const d = await api('/api/save', { method: 'POST', headers: {'Content-Type': 'application/json'},
