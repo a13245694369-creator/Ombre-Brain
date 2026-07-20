@@ -649,10 +649,27 @@ async function save(encPath) {
   toast('已保存' + (d.note ? '，' + d.note : '')); hide(); load();
 }
 async function del(encPath) {
-  if (!confirm('真的删掉这条记忆？删了就没了。')) return;
+  // 两步确认，不走浏览器的 confirm() 弹窗——App 的内嵌网页会把弹窗吞掉，
+  // 这里自己做：第一次点按钮变红色警告，4 秒内再点一次才真删
+  const btn = window.event ? window.event.target : null;
+  if (btn && !btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.dataset.orig = btn.textContent;
+    btn.style.background = '#a33';
+    btn.textContent = '⚠️ 再点一次，真的删！';
+    setTimeout(() => {
+      if (btn.dataset.armed) {
+        btn.dataset.armed = '';
+        btn.style.background = '';
+        btn.textContent = btn.dataset.orig;
+      }
+    }, 4000);
+    return;
+  }
+  if (!btn && !confirm('真的删掉这条记忆？删了就没了。')) return;
   const d = await api('/api/delete', { method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ path: decodeURIComponent(encPath) }) });
-  if (d.error) return toast(d.error);
+  if (d.error) return toast('删除失败：' + d.error);
   toast('已删除'); hide(); load();
 }
 function openNew() {
