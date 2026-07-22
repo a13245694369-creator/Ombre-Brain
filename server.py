@@ -517,6 +517,8 @@ async function openEdit(encPath, content) {
     body = parts.slice(2).join('---').trim();
   }
   window._hdr = isDraft ? '' : hdr;
+  // 记住打开时的钉选状态：只有她真的动了这个勾，保存时才改钉选，免得误动重要度/户口
+  window._pin0 = isDraft ? null : hdrPinned(hdr);
   // 记住原文里哪些词带 [[链接]]，保存时按这份清单自动穿回去
   window._links = isDraft ? [] :
     Array.from(new Set((body.match(/\[\[[^\]]*\]\]/g) || []).map(s => s.slice(2, -2))));
@@ -529,6 +531,9 @@ async function openEdit(encPath, content) {
     <input type="text" id="ed_name" value="${esc(hdrName(hdr))}">
     <label>标签（逗号分隔，检索第二看重）</label>
     <input type="text" id="ed_tags" value="${esc(hdrTags(hdr).join('，'))}">
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-weight:600">
+      <input type="checkbox" id="ed_pin" ${hdrPinned(hdr) ? 'checked' : ''}> 📌 钉选（重要度拉满，每次对话必浮现）
+    </label>
     <label>正文</label>`;
   show(`
     <h2>编辑 ${esc(title)}</h2>
@@ -599,6 +604,35 @@ function hdrApply(hdr, name, tags) {
   }
   return out.join('\\n');
 }
+// ===== 钉选：pinned/type/importance 三个字段的读写（纯文本行处理，不碰别的字段）=====
+function hdrPinned(hdr) {
+  for (const line of hdr.split('\\n')) {
+    if (line.startsWith('pinned:')) return /true/i.test(line);
+  }
+  return false;
+}
+function hdrSetField(hdr, key, value) {
+  const lines = hdr.split('\\n');
+  const out = [];
+  let done = false;
+  for (const line of lines) {
+    if (!done && line.startsWith(key + ':')) { out.push(key + ': ' + value); done = true; }
+    else out.push(line);
+  }
+  if (!done) {  // 头里原本没这字段，补在收尾的 --- 前面
+    const end = out.lastIndexOf('---');
+    if (end > 0) out.splice(end, 0, key + ': ' + value);
+    else out.push(key + ': ' + value);
+  }
+  return out.join('\\n');
+}
+function hdrSetPin(hdr, pinned) {
+  // 钉选＝pinned:true+type:permanent+importance:10；取消＝false/dynamic/8（与 AI 起草的约定一致）
+  hdr = hdrSetField(hdr, 'pinned', pinned ? 'true' : 'false');
+  hdr = hdrSetField(hdr, 'type', pinned ? 'permanent' : 'dynamic');
+  hdr = hdrSetField(hdr, 'importance', pinned ? '10' : '8');
+  return hdr;
+}
 // 把纯文本里原来带链接的词重新穿上 [[ ]]（长词优先，已包好的不重复包）
 function relink(text, terms) {
   const sorted = Array.from(new Set(terms)).filter(Boolean)
@@ -639,6 +673,11 @@ async function save(encPath) {
       const name = nEl.value.trim().replace(/"/g, "'");  // 双引号会打坏格式，换成单引号
       const tags = tEl.value.split(/[,，、]/).map(s => s.trim().replace(/"/g, "'")).filter(Boolean);
       if (name) window._hdr = hdrApply(window._hdr, name, tags);
+    }
+    // 钉选打勾：只有状态真的变了才写（勾上→钉选/permanent/10，取消→dynamic/8）
+    const pEl = document.getElementById('ed_pin');
+    if (pEl && window._pin0 !== null && pEl.checked !== window._pin0) {
+      window._hdr = hdrSetPin(window._hdr, pEl.checked);
     }
     content = window._hdr + '\\n\\n' + body + '\\n';
   }
