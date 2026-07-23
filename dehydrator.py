@@ -179,12 +179,13 @@ class Dehydrator:
     # Try API first, fallback to local
     # 先尝试 API，失败则回退本地
     # ---------------------------------------------------------
-    async def dehydrate(self, content: str, metadata: dict = None) -> str:
+    async def dehydrate(self, content: str, metadata: dict = None, allow_api: bool = True) -> str:
         """
         Dehydrate/compress memory content.
         Returns formatted summary string ready for Claude context injection.
         对记忆内容做脱水压缩。
         返回格式化的摘要字符串，可直接注入 Claude 上下文。
+        allow_api=False 时跳过 LLM 调用，只走本地/原文（用于浮现大量钉选桶，避免逐条调 API 卡死）。
         """
         if not content or not content.strip():
             return "（空记忆 / empty memory）"
@@ -196,7 +197,7 @@ class Dehydrator:
 
         # --- Try API compression first (best quality) ---
         # --- 优先尝试 API 压缩 ---
-        if self.api_available:
+        if self.api_available and allow_api:
             try:
                 result = await self._api_dehydrate(content)
                 if result:

@@ -871,7 +871,9 @@ async def breath(
         pinned_results = []
         for b in pinned_buckets:
             try:
-                summary = await dehydrator.dehydrate(b["content"], b["metadata"])
+                # 钉选桶是精心整理的核心准则，浮现时不再逐条调 LLM 重压（钉选多时会逐条卡死），
+                # 走本地/原文快速处理，瞬间返回且对短记忆保持原文。
+                summary = await dehydrator.dehydrate(b["content"], b["metadata"], allow_api=False)
                 pinned_results.append(f"📌 [核心准则] {summary}")
             except Exception as e:
                 logger.warning(f"Failed to dehydrate pinned bucket / 钉选桶脱水失败: {e}")
