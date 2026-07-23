@@ -914,7 +914,8 @@ async def breath(
             parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
         if dynamic_results:
             parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
-        return "\n\n".join(parts)
+        # 擦掉 [[ ]] 双括号链接标记（存储里保留，只在返回给模型时擦，官克直连也就干净了）
+        return "\n\n".join(parts).replace("[[", "").replace("]]", "")
 
     # --- With args: search mode / 有参数：检索模式 ---
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
@@ -967,7 +968,8 @@ async def breath(
     if not results:
         return "未找到相关记忆。"
 
-    return "\n---\n".join(results)
+    # 擦掉 [[ ]] 双括号链接标记（同浮现路径，只在返回时擦）
+    return "\n---\n".join(results).replace("[[", "").replace("]]", "")
 
 
 # =============================================================
