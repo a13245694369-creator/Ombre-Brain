@@ -128,22 +128,10 @@ async def export_memories(request):
 # 近况快照接收口：总机每轮聊天后把"最近聊到哪"写进一个固定记忆桶
 # 同一个文件反复覆盖更新，不会堆积；新对话开场靠它接上上文
 # =============================================================
-@mcp.custom_route("/snapshot", methods=["POST"])
-async def update_snapshot_route(request):
+def _write_snapshot(content: str) -> str:
+    """把"最近聊到哪了"写进固定的近况快照桶（同一文件反复覆盖、不堆积），返回时间戳。
+    总机的 POST /snapshot 和官克直连时调用的 catch_up 工具，都走这里，写法统一。"""
     import time as _time
-    from starlette.responses import JSONResponse
-
-    token = os.environ.get("OMBRE_EXPORT_TOKEN", "")
-    if not token or request.query_params.get("token", "") != token:
-        return JSONResponse({"error": "token 不对"}, status_code=401)
-    try:
-        data = await request.json()
-    except Exception:
-        return JSONResponse({"error": "请求格式不对"}, status_code=400)
-    content = (data.get("content") or "").strip()
-    if not content:
-        return JSONResponse({"error": "空内容"}, status_code=400)
-
     now = _time.strftime("%Y-%m-%dT%H:%M:%S")
     target_dir = os.path.join(config["buckets_dir"], "dynamic", "内心")
     os.makedirs(target_dir, exist_ok=True)
@@ -172,7 +160,39 @@ valence: 0.6
 """
     with open(os.path.join(target_dir, "近况快照_snapshot0.md"), "w", encoding="utf-8") as f:
         f.write(body_text)
+    return now
+
+
+@mcp.custom_route("/snapshot", methods=["POST"])
+async def update_snapshot_route(request):
+    from starlette.responses import JSONResponse
+    token = os.environ.get("OMBRE_EXPORT_TOKEN", "")
+    if not token or request.query_params.get("token", "") != token:
+        return JSONResponse({"error": "token 不对"}, status_code=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "请求格式不对"}, status_code=400)
+    content = (data.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"error": "空内容"}, status_code=400)
+    now = _write_snapshot(content)
     return JSONResponse({"status": "ok", "updated": now})
+
+
+@mcp.tool()
+async def catch_up(recap: str) -> str:
+    """更新"近况快照"：记下你和小音最近聊到哪了，好让她切到别的窗口或客户端（Kelivo/App/TG）时无缝接上。
+    每聊完一段有内容的对话就调用一次；recap 写最近这轮对话的简要实录或小结（几句到两三百字都行）。
+    同一份快照反复覆盖、只留最新，不会堆积。"""
+    recap = (recap or "").strip()
+    if not recap:
+        return "快照内容为空，没更新。"
+    try:
+        now = _write_snapshot(recap)
+        return f"📸 近况快照已更新（{now}）"
+    except Exception as e:
+        return f"快照更新失败：{e}"
 
 
 # =============================================================
