@@ -250,7 +250,11 @@ class BucketManager:
         if "pinned" in kwargs:
             post["pinned"] = bool(kwargs["pinned"])
             if kwargs["pinned"]:
-                post["importance"] = 10  # pinned → lock importance to 10
+                post["type"] = "permanent"   # 钉选 → 户口迁去永久层
+                post["importance"] = 10       # pinned → lock importance to 10
+            else:
+                post["type"] = "dynamic"      # 取消钉选 → 户口回日常层
+                post["importance"] = 8         # 重要度回落，不再每次浮现
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
         post["last_active"] = now_iso()
@@ -261,6 +265,33 @@ class BucketManager:
         except OSError as e:
             logger.error(f"Failed to write bucket update / 写入桶更新失败: {file_path}: {e}")
             return False
+
+        # --- Keep folder consistent when pinned toggles ---
+        # --- 钉选状态切换时把文件搬到对应文件夹，杜绝"字段钉了人在dynamic"的夹生态 ---
+        if "pinned" in kwargs:
+            try:
+                target_root = self.permanent_dir if kwargs["pinned"] else self.dynamic_dir
+                abs_file = os.path.abspath(file_path)
+                abs_perm = os.path.abspath(self.permanent_dir)
+                abs_dyn = os.path.abspath(self.dynamic_dir)
+                cur_root = (
+                    abs_perm if abs_file.startswith(abs_perm + os.sep)
+                    else abs_dyn if abs_file.startswith(abs_dyn + os.sep)
+                    else None
+                )
+                if cur_root and cur_root != os.path.abspath(target_root):
+                    domain = post.get("domain", ["未分类"])
+                    primary_domain = sanitize_name(domain[0]) if domain else "未分类"
+                    target_dir = os.path.join(target_root, primary_domain)
+                    os.makedirs(target_dir, exist_ok=True)
+                    dest = safe_path(target_dir, os.path.basename(file_path))
+                    shutil.move(file_path, str(dest))
+                    logger.info(
+                        f"Moved bucket on pin toggle / 钉选搬家: {bucket_id} → "
+                        f"{'permanent' if kwargs['pinned'] else 'dynamic'}/{primary_domain}/"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to move bucket after pin toggle / 钉选搬家失败: {bucket_id}: {e}")
 
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
         return True
